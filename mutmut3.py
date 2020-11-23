@@ -82,6 +82,8 @@ def mutmut_3():
         return
     print('done')
 
+    start = datetime.now()
+
     # manual fork
     key_from_pid = {}
     for key in scientist_mutants.check_candidate_mutants.keys():
