@@ -76,22 +76,45 @@ def mutmut_3():
     import os
     import hammett
 
-    # print('running baseline...', end='')
-    # if hammett.main(fail_fast=True, disable_assert_analyze=True) != 0:
-    #     print("FAILED")
-    #     return
-    # print('done')
+    print('running baseline...', end='')
+    if hammett.main(fail_fast=True, disable_assert_analyze=True) != 0:
+        print("FAILED")
+        return
+    print('done')
 
-    start = datetime.now()
+    # manual fork
+    key_from_pid = {}
     for key in scientist_mutants.check_candidate_mutants.keys():
-        os.environ['MUTANT_UNDER_TEST'] = key
-        if hammett.main(quiet=True, fail_fast=True, disable_assert_analyze=True) == 0:
-            pass
-        #     print('survived!')
-        # else:
-        #     print('killed!')
+        pid = os.fork()
+        if not pid:
+            os.environ['MUTANT_UNDER_TEST'] = key
+            # In the child
+            result = hammett.main(quiet=True, fail_fast=True, disable_assert_analyze=True)
+            if result != 0:
+                # os.write(write, b'x')
+                # TODO: write failure information to stdout?
+                pass
+            os._exit(result)
+        else:
+            key_from_pid[pid] = key
+
+    result_by_key = {}
+    try:
+        while True:
+            pid, status = os.wait()
+            result_by_key[key_from_pid[pid]] = (0xFF00 & status) >> 8  # The high byte contains the exit code
+    except ChildProcessError:
+        pass
+
+    print(result_by_key)
+    covered = {k for k, v in result_by_key.items() if v != 0}
+    not_covered = {k for k, v in result_by_key.items() if v == 0}
+    print('covered: ', covered)
+    print('not covered: ', not_covered)
+
     t = datetime.now() - start
     print(t, len(scientist_mutants.check_candidate_mutants), len(scientist_mutants.check_candidate_mutants) / t.total_seconds(), 'mutations per s')
+
 
 if __name__ == '__main__':
     mutmut_3()
