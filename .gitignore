@@ -53,3 +53,6 @@ docs/Form.rst
 # tests
 results/
 .pytest_cache
+
+# mutmut3
+mutants/

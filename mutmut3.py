@@ -1,5 +1,6 @@
 # from datetime import datetime
 from datetime import datetime
+from os import makedirs
 
 from mutmut import (
     list_mutations,
@@ -11,7 +12,11 @@ from parso import parse
 
 def create_mutants():
 
-    with open('scientist_mutants.py', 'w') as out:
+    makedirs('mutants/scientist/', exist_ok=True)
+
+    ids = []
+
+    with open('mutants/scientist/__init__.py', 'w') as out:
 
         # start = datetime.now()
         c = Context(filename='scientist/__init__.py')
@@ -25,7 +30,6 @@ def create_mutants():
 
         for i, mutation_id in enumerate(mutation_ids):
             print(file=out)
-            print('# ---------- ', file=out)
             c.mutation_id = mutation_id
             new_code, number = mutate(c)
             c.ast.children[0].name.value += f'_mutant_{i}'
@@ -34,10 +38,14 @@ def create_mutants():
             print(c.get_code(), file=out)
             c.ast.children[0].name.value = orig_name
 
+            ids.append(i)
+
+        print(file=out)
         print(f'{orig_name}_mutants = {{' + ', '.join(f'"{i}": {m}' for i, m in enumerate(mutant_names)) + '}', file=out)
 
         # trampoline
         print("""
+
 def trampoline(orig, mutants, *args, **kwargs):
     import os
     mutant_under_test = os.environ.get('MUTANT_UNDER_TEST', None)
@@ -56,6 +64,8 @@ def {orig_name}{signature}:
 
         f.children[-1] = trampoline_ast.children[0].children[-1]
 
+        print(file=out)
+        print(file=out)
         print(f.get_code(), file=out)
 
         # print()
@@ -63,16 +73,17 @@ def {orig_name}{signature}:
         # t = datetime.now() - start
         # print(len(mutation_ids), len(mutation_ids) / t.total_seconds(), 'mutations per s')
 
+    return ids
+
 
 def mutmut_3():
     start = datetime.now()
-    create_mutants()
+    ids = create_mutants()
     time = datetime.now() - start
     print('mutation generation', time)
 
     import sys
-    import scientist_mutants
-    sys.modules['scientist'] = scientist_mutants
+    sys.path.insert(0, 'mutants')
     import os
     import hammett
 
@@ -97,11 +108,11 @@ def mutmut_3():
 
     start = datetime.now()
 
-    for key in scientist_mutants.check_candidate_mutants.keys():
+    for key in ids:
         pid = os.fork()
         if not pid:
             # In the child
-            os.environ['MUTANT_UNDER_TEST'] = key
+            os.environ['MUTANT_UNDER_TEST'] = str(key)
             result = hammett.main_run_tests(**hammett_kwargs)
             if result != 0:
                 # TODO: write failure information to stdout?
@@ -129,7 +140,7 @@ def mutmut_3():
     print('covered: ', covered)
     print('not covered: ', not_covered)
 
-    print(t, len(scientist_mutants.check_candidate_mutants), int(len(scientist_mutants.check_candidate_mutants) / t.total_seconds()), 'mutations per s')
+    print(t, len(ids), int(len(ids) / t.total_seconds()), 'mutations per s')
 
 
 if __name__ == '__main__':
