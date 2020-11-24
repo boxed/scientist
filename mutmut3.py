@@ -1,6 +1,6 @@
-# from datetime import datetime
 from datetime import datetime
 from os import makedirs
+from pathlib import Path
 
 from mutmut import (
     list_mutations,
@@ -11,15 +11,18 @@ from parso import parse
 
 
 def create_mutants():
+    next_id = 0
+    next_id = create_mutants_for_file('scientist/__init__.py', next_id=next_id)
+    return next_id
 
-    makedirs('mutants/scientist/', exist_ok=True)
 
-    ids = []
+def create_mutants_for_file(filename, next_id):
+    output_path = Path('mutants') / filename
+    makedirs(output_path.parent, exist_ok=True)
 
-    with open('mutants/scientist/__init__.py', 'w') as out:
-
+    with open(output_path, 'w') as out:
         # start = datetime.now()
-        c = Context(filename='scientist/__init__.py')
+        c = Context(filename=filename)
         orig_name = c.ast.children[0].name.value
         c.ast.children[0].name.value += '_orig'
         print(c.get_code(), file=out)
@@ -28,17 +31,17 @@ def create_mutants():
         mutation_ids = list_mutations(c)
         mutant_names = []
 
-        for i, mutation_id in enumerate(mutation_ids):
+        for mutation_id in mutation_ids:
             print(file=out)
             c.mutation_id = mutation_id
             new_code, number = mutate(c)
-            c.ast.children[0].name.value += f'_mutant_{i}'
+            c.ast.children[0].name.value += f'_mutant_{next_id}'
             mutant_names.append(c.ast.children[0].name.value)
             assert number == 1, number
             print(c.get_code(), file=out)
             c.ast.children[0].name.value = orig_name
 
-            ids.append(i)
+            next_id += 1
 
         print(file=out)
         print(f'{orig_name}_mutants = {{' + ', '.join(f'"{i}": {m}' for i, m in enumerate(mutant_names)) + '}', file=out)
@@ -73,12 +76,12 @@ def {orig_name}{signature}:
         # t = datetime.now() - start
         # print(len(mutation_ids), len(mutation_ids) / t.total_seconds(), 'mutations per s')
 
-    return ids
+    return next_id
 
 
 def mutmut_3():
     start = datetime.now()
-    ids = create_mutants()
+    next_id = create_mutants()
     time = datetime.now() - start
     print('mutation generation', time)
 
@@ -108,7 +111,7 @@ def mutmut_3():
 
     start = datetime.now()
 
-    for key in ids:
+    for key in range(next_id):
         pid = os.fork()
         if not pid:
             # In the child
@@ -140,7 +143,7 @@ def mutmut_3():
     print('covered: ', covered)
     print('not covered: ', not_covered)
 
-    print(t, len(ids), int(len(ids) / t.total_seconds()), 'mutations per s')
+    print(t, next_id, int(next_id / t.total_seconds()), 'mutations per s')
 
 
 if __name__ == '__main__':
