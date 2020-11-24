@@ -1,8 +1,12 @@
 from datetime import datetime
-from os import makedirs
+from os import (
+    makedirs,
+    walk,
+)
 from pathlib import Path
 
 from mutmut import (
+    guess_paths_to_mutate,
     list_mutations,
     Context,
     mutate,
@@ -11,8 +15,13 @@ from parso import parse
 
 
 def create_mutants():
+    paths = [guess_paths_to_mutate()]
     next_id = 0
-    next_id = create_mutants_for_file('scientist/__init__.py', next_id=next_id)
+    for path in paths:
+        for root, dirs, files in walk(path):
+            for filename in files:
+                if filename.endswith('.py'):
+                    next_id = create_mutants_for_file(Path(root) / filename, next_id=next_id)
     return next_id
 
 
