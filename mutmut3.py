@@ -82,31 +82,46 @@ def mutmut_3():
         return
     print('done')
 
+    # manual fork
+    result_by_key = {}
+
+    def read_one_child_exit_status():
+        pid, status = os.wait()
+        result_by_key[key_from_pid[pid]] = (0xFF00 & status) >> 8  # The high byte contains the exit code
+
+    hammett_kwargs = hammett.main_setup(quiet=True, fail_fast=True, disable_assert_analyze=True)
+
+    key_from_pid = {}
+    running_children = 0
+    max_children = 16
+
     start = datetime.now()
 
-    # manual fork
-    key_from_pid = {}
     for key in scientist_mutants.check_candidate_mutants.keys():
         pid = os.fork()
         if not pid:
-            os.environ['MUTANT_UNDER_TEST'] = key
             # In the child
-            result = hammett.main(quiet=True, fail_fast=True, disable_assert_analyze=True)
+            os.environ['MUTANT_UNDER_TEST'] = key
+            result = hammett.main_run_tests(**hammett_kwargs)
             if result != 0:
-                # os.write(write, b'x')
                 # TODO: write failure information to stdout?
                 pass
             os._exit(result)
         else:
             key_from_pid[pid] = key
+            running_children += 1
 
-    result_by_key = {}
+        if running_children >= max_children:
+            read_one_child_exit_status()
+            running_children -= 1
+
     try:
         while True:
-            pid, status = os.wait()
-            result_by_key[key_from_pid[pid]] = (0xFF00 & status) >> 8  # The high byte contains the exit code
+            read_one_child_exit_status()
     except ChildProcessError:
         pass
+
+    t = datetime.now() - start
 
     print(result_by_key)
     covered = {k for k, v in result_by_key.items() if v != 0}
@@ -114,8 +129,7 @@ def mutmut_3():
     print('covered: ', covered)
     print('not covered: ', not_covered)
 
-    t = datetime.now() - start
-    print(t, len(scientist_mutants.check_candidate_mutants), len(scientist_mutants.check_candidate_mutants) / t.total_seconds(), 'mutations per s')
+    print(t, len(scientist_mutants.check_candidate_mutants), int(len(scientist_mutants.check_candidate_mutants) / t.total_seconds()), 'mutations per s')
 
 
 if __name__ == '__main__':
