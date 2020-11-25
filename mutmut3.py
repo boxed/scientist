@@ -13,6 +13,15 @@ from mutmut import (
 )
 from parso import parse
 
+from rich.traceback import install
+install(show_locals=True)
+
+from inspect import signature
+def foo(a, *, b:int, **kwargs):
+    pass
+
+signature(foo)
+
 
 def create_mutants():
     paths = [guess_paths_to_mutate()]
@@ -20,57 +29,61 @@ def create_mutants():
     for path in paths:
         for root, dirs, files in walk(path):
             for filename in files:
-                if filename.endswith('.py'):
-                    next_id = create_mutants_for_file(Path(root) / filename, next_id=next_id)
+                if not filename.endswith('.py'):
+                    continue
+                if filename.endswith('__tests.py'):
+                    continue
+                if filename.startswith('test_.py'):
+                    continue
+                next_id = create_mutants_for_file(Path(root) / filename, next_id=next_id)
     return next_id
 
 
-def write_trampoline(out, c, orig_name, mutant_names):
+def write_trampoline(out, orig_name, mutant_names):
     print(file=out)
-    print(f'{orig_name}_mutants = {{' + ', '.join(f'"{i}": {m}' for i, m in enumerate(mutant_names)) + '}', file=out)
 
-    # trampoline
-    print("""
+    def index(s):
+        return s.rpartition('_')[-1]
 
-def trampoline(orig, mutants, *args, **kwargs):
-    import os
-    mutant_under_test = os.environ.get('MUTANT_UNDER_TEST', None)
-    return mutants.get(mutant_under_test, orig)(*args, **kwargs)""", file=out)
-
-    f = c.ast.children[0]
-    signature = f.children[2].get_code()
-
-    # this is actually wrong, because the signature can be "(foo, *, bar)" which is invalid at the call site, need to fix this at some point
-    call = signature[1:-1]  # the slice is to remove the parens
-
-    # Replace body with trampoline
-    trampoline_ast = parse(f"""
-def {orig_name}{signature}:
-    return trampoline({orig_name}_orig, {orig_name}_mutants, {call})""")
-
-    f.children[-1] = trampoline_ast.children[0].children[-1]
+    print(f'{orig_name}_mutants = {{' + ', '.join(f'"{index(m)}": {m}' for m in mutant_names) + '}', file=out)
 
     print(file=out)
     print(file=out)
-    print(f.get_code(), file=out)
+    print(f"""
+def {orig_name}(*args, **kwargs):
+    return trampoline({orig_name}_orig, {orig_name}_mutants, *args, **kwargs)  
+""", file=out)
+    print(f'{orig_name}.__signature__ = __signature({orig_name}_orig)', file=out)
 
 
 def write_mutant(out, c, mutation_id, next_id, mutant_names, orig_name):
     print(file=out)
     c.mutation_id = mutation_id
     new_code, number = mutate(c)
-    c.ast.children[0].name.value += f'_mutant_{next_id}'
-    mutant_names.append(c.ast.children[0].name.value)
-    assert number == 1, number
-    print(c.get_code(), file=out)
-    c.ast.children[0].name.value = orig_name
+    node = mutation_id.subject_stack[-1]
+    node.name.value += f'_mutant_{next_id}'
+    mutant_names.append(node.name.value)
+    # assert number == 1, number
+    if number != 1:
+        print(f'warning: got {number} mutations when mutating {mutation_id}')
+    print(node.get_code(), file=out)
+    node.name.value = orig_name
 
 
-def write_original(out, foo):
-    last_subject, source = foo
-    orig_name = last_subject.name.value
-    print(source, file=out)
+def write_original_alias(out, last_subject_stack):
+    orig_name = last_subject_stack[-1].name.value
     print(f'{orig_name}_orig = {orig_name}', file=out)  # the trampoline will then overwrite the original
+
+
+def write_trampoline_impl(out):
+    print("""
+from inspect import signature as __signature
+
+
+def trampoline(orig, mutants, *args, **kwargs):
+    import os
+    mutant_under_test = os.environ.get('MUTANT_UNDER_TEST', None)
+    return mutants.get(mutant_under_test, orig)(*args, **kwargs)""", file=out)
 
 
 def create_mutants_for_file(filename, next_id):
@@ -79,38 +92,42 @@ def create_mutants_for_file(filename, next_id):
 
     with open(output_path, 'w') as out:
         c = Context(filename=filename)
+        print(c.source, file=out)
+        write_trampoline_impl(out)
 
         mutation_ids = list_mutations(c)
 
         mutant_names = []
-        last_subject = None
+        last_subject_stack = None
 
         for mutation_id in mutation_ids:
-            if not mutation_id.subject:
+            if not mutation_id.subject_stack:
                 continue
 
-            if mutation_id.subject[0].type != 'funcdef':
+            # TODO: mutate methods too!, then we have a classdef then a funcdef in the stack
+            if mutation_id.subject_stack[0].type != 'funcdef':
                 continue
 
-            if last_subject != mutation_id.subject:
+            if last_subject_stack != mutation_id.subject_stack:
+                if last_subject_stack:
+                    write_original_alias(out, last_subject_stack)
+
                 if mutant_names:
-                    write_trampoline(out, c, orig_name, mutant_names)
+                    write_trampoline(out, orig_name, mutant_names)
 
-                orig_name = mutation_id.subject[0].name.value
-                if last_subject:
-                    write_original(out, last_subject)
+                orig_name = mutation_id.subject_stack[0].name.value
                 mutant_names = []
-                last_subject = mutation_id.subject
+                last_subject_stack = mutation_id.subject_stack
 
             write_mutant(out, c, mutation_id, next_id, mutant_names, orig_name)
 
             next_id += 1
 
-        if last_subject:
-            write_original(out, last_subject)
+        if last_subject_stack:
+            write_original_alias(out, last_subject_stack)
 
         if mutant_names:
-            write_trampoline(out, c, orig_name, mutant_names)
+            write_trampoline(out, orig_name, mutant_names)
 
     return next_id
 
@@ -177,7 +194,6 @@ def mutmut_3():
 
     t = datetime.now() - start
 
-    print(result_by_key)
     covered = {k for k, v in result_by_key.items() if v != 0}
     not_covered = {k for k, v in result_by_key.items() if v == 0}
     print('covered: ', covered)

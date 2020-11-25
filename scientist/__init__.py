@@ -1,3 +1,7 @@
+from datetime import date
+import time
+
+
 def check_candidate(a, candidate, callback_when_different, *args, **kwargs):
     control_result = None
     candidate_result = None
@@ -41,3 +45,8 @@ def check_candidate(a, candidate, callback_when_different, *args, **kwargs):
         raise control_exception
 
     return control_result
+
+
+class Foo:
+    def asd(self):
+        return 1 + 1
