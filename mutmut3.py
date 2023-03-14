@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 from os import (
     makedirs,
@@ -12,13 +13,17 @@ from mutmut import (
     mutate,
 )
 from parso import parse
+from tqdm import tqdm
 
 from rich.traceback import install
 install(show_locals=True)
 
 from inspect import signature
-def foo(a, *, b:int, **kwargs):
+
+
+def foo(a, *, b: int, **kwargs):
     pass
+
 
 signature(foo)
 
@@ -57,6 +62,8 @@ def {orig_name}(*args, **kwargs):
 
 
 def write_mutant(out, c, mutation_id, next_id, mutant_names, orig_name):
+    if not mutation_id.subject_stack:
+        return
     print(file=out)
     c.mutation_id = mutation_id
     new_code, number = mutate(c)
@@ -76,6 +83,7 @@ def write_original_alias(out, last_subject_stack):
 
 
 def write_trampoline_impl(out):
+    # language=python
     print("""
 from inspect import signature as __signature
 
@@ -90,6 +98,12 @@ def create_mutants_for_file(filename, next_id):
     output_path = Path('mutants') / filename
     makedirs(output_path.parent, exist_ok=True)
 
+    input_stat = os.stat(filename)
+
+    if output_path.exists() and output_path.stat().st_mtime == input_stat.st_mtime:
+        print('    skipped', output_path, 'already up to date')
+        return int(os.getxattr(output_path, 'user.next_id').decode())
+
     with open(output_path, 'w') as out:
         c = Context(filename=filename)
         print(c.source, file=out)
@@ -101,23 +115,23 @@ def create_mutants_for_file(filename, next_id):
         last_subject_stack = None
 
         for mutation_id in mutation_ids:
-            if not mutation_id.subject_stack:
+            if not c.subject_stack:
                 continue
 
             # TODO: mutate methods too!, then we have a classdef then a funcdef in the stack
-            if mutation_id.subject_stack[0].type != 'funcdef':
+            if c.subject_stack[0].type != 'funcdef':
                 continue
 
-            if last_subject_stack != mutation_id.subject_stack:
+            if last_subject_stack != c.subject_stack:
                 if last_subject_stack:
                     write_original_alias(out, last_subject_stack)
 
                 if mutant_names:
                     write_trampoline(out, orig_name, mutant_names)
 
-                orig_name = mutation_id.subject_stack[0].name.value
+                orig_name = c.subject_stack[0].name.value
                 mutant_names = []
-                last_subject_stack = mutation_id.subject_stack
+                last_subject_stack = c.subject_stack
 
             write_mutant(out, c, mutation_id, next_id, mutant_names, orig_name)
 
@@ -129,11 +143,15 @@ def create_mutants_for_file(filename, next_id):
         if mutant_names:
             write_trampoline(out, orig_name, mutant_names)
 
+    os.utime(output_path, (input_stat.st_atime, input_stat.st_mtime))
+    os.setxattr(output_path, 'user.next_id', str(next_id).encode())
+
     return next_id
 
 
 def mutmut_3():
     start = datetime.now()
+    print('generating mutants...')
     next_id = create_mutants()
     time = datetime.now() - start
     print('mutation generation', time)
@@ -154,19 +172,21 @@ def mutmut_3():
 
     def read_one_child_exit_status():
         pid, status = os.wait()
+        # print('got exit', pid)
         result_by_key[key_from_pid[pid]] = (0xFF00 & status) >> 8  # The high byte contains the exit code
 
     hammett_kwargs = hammett.main_setup(quiet=True, fail_fast=True, disable_assert_analyze=True)
 
     key_from_pid = {}
     running_children = 0
-    max_children = 16
+    max_children = 1
 
     start = datetime.now()
 
-    for key in range(next_id):
+    for key in tqdm(range(next_id)):
         pid = os.fork()
         if not pid:
+            # print('in child', os.getpid())
             # In the child
             os.environ['MUTANT_UNDER_TEST'] = str(key)
 
@@ -177,8 +197,10 @@ def mutmut_3():
             if result != 0:
                 # TODO: write failure information to stdout?
                 pass
+            # print('exiting', os.getpid())
             os._exit(result)
         else:
+            # print('in master', pid)
             key_from_pid[pid] = key
             running_children += 1
 
@@ -187,8 +209,10 @@ def mutmut_3():
             running_children -= 1
 
     try:
-        while True:
+        # print('waiting at the end')
+        while running_children:
             read_one_child_exit_status()
+            running_children -= 1
     except ChildProcessError:
         pass
 
@@ -199,9 +223,10 @@ def mutmut_3():
     print('covered: ', covered)
     print('not covered: ', not_covered)
 
-    print(t, next_id, int(next_id / t.total_seconds()), 'mutations per s')
+    print('time:', t)
+    print('next ID:', next_id)
+    print('mutations/s:', int(next_id / t.total_seconds()))
 
 
 if __name__ == '__main__':
     mutmut_3()
-
