@@ -1,5 +1,6 @@
 import ast
 import gc
+import json
 import os
 from datetime import datetime
 from os import (
@@ -189,36 +190,38 @@ def mutmut_3():
     os.environ['MUTANT_UNDER_TEST'] = '-1'
 
     print('running baseline...', end='')
-    print(sys.path)
-    if hammett.main(fail_fast=True, disable_assert_analyze=True) != 0:
+    if hammett.main(quiet=True, fail_fast=True, disable_assert_analyze=True) != 0:
         print("FAILED")
         return
     print('done')
 
     print('running baseline 2...', end='')
-    print(sys.path)
-    if hammett.main(fail_fast=True, disable_assert_analyze=True) != 0:
+    if hammett.main(quiet=True, fail_fast=True, disable_assert_analyze=True) != 0:
         print("FAILED")
         return
     print('done')
 
     print('running forced fail test')
-    print(sys.path)
     os.environ['MUTANT_UNDER_TEST'] = 'fail'
     if hammett.main(fail_fast=True, disable_assert_analyze=True) == 0:
         print("FAILED")
         return
     print('done')
 
-    # manual fork
-    result_by_key = {}
+    db_path = Path('mutants') / 'db.json'
+    try:
+        with open(db_path) as f:
+            db = json.loads(f.read())
+            result_by_key = {int(k): v for k, v in db['result_by_key'].items()}
+    except FileNotFoundError:
+        result_by_key = {}
 
     def read_one_child_exit_status():
         pid, status = os.wait()
         result_by_key[key_from_pid[pid]] = (0xFF00 & status) >> 8  # The high byte contains the exit code
 
     hammett_kwargs = hammett.main_setup(
-        quiet=False,
+        quiet=True,
         fail_fast=True,
         disable_assert_analyze=True,
         use_cache=False,
@@ -232,35 +235,55 @@ def mutmut_3():
 
     gc.freeze()
 
-    for key in tqdm(range(next_id)):
-        pid = os.fork()
-        if not pid:
-            sys.path.insert(0, os.path.abspath('mutants'))
-            # In the child
-            os.environ['MUTANT_UNDER_TEST'] = str(key)
-
-            # TODO: this is needed for non-memory DBs
-            # hammett.Config.workerinput = dict(workerinput=f'_{key}')
-
-            result = hammett.main_run_tests(**hammett_kwargs)
-            if result != 0:
-                # TODO: write failure information to stdout?
-                pass
-            os._exit(result)
-        else:
-            key_from_pid[pid] = key
-            running_children += 1
-
-        if running_children >= max_children:
-            read_one_child_exit_status()
-            running_children -= 1
+    count = 0
 
     try:
-        while running_children:
-            read_one_child_exit_status()
-            running_children -= 1
-    except ChildProcessError:
-        pass
+        print('Running mutation testing...')
+        for key in tqdm(range(next_id)):
+            if key in result_by_key:
+                continue
+
+            pid = os.fork()
+            if not pid:
+                sys.path.insert(0, os.path.abspath('mutants'))
+                # In the child
+                os.environ['MUTANT_UNDER_TEST'] = str(key)
+
+                # TODO: this is needed for non-memory DBs
+                hammett.Config.workerinput = dict(workerinput=f'_{key}')
+
+                result = hammett.main_run_tests(**hammett_kwargs)
+                if result != 0:
+                    # TODO: write failure information to stdout?
+                    pass
+                os._exit(result)
+            else:
+                key_from_pid[pid] = key
+                running_children += 1
+
+            if running_children >= max_children:
+                read_one_child_exit_status()
+                count += 1
+                running_children -= 1
+
+        try:
+            while running_children:
+                read_one_child_exit_status()
+                count += 1
+                running_children -= 1
+        except ChildProcessError:
+            pass
+    except KeyboardInterrupt:
+        print('aborting...')
+    finally:
+        with open(db_path, 'w') as f:
+            json.dump(
+                dict(
+                    version=1,
+                    result_by_key=result_by_key,
+                ),
+                f
+            )
 
     t = datetime.now() - start
 
@@ -271,7 +294,8 @@ def mutmut_3():
 
     print('time:', t)
     print('next ID:', next_id)
-    print('mutations/s:', int(next_id / t.total_seconds()))
+    print('number of tested mutants:', count)
+    print('mutations/s:', count / t.total_seconds())
 
 
 if __name__ == '__main__':

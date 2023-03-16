@@ -48,5 +48,18 @@ def check_candidate(a, candidate, callback_when_different, *args, **kwargs):
 
 
 class Foo:
-    def asd(self):
-        return 1 + 1
+    def foo(self):
+        def nested_foo():
+            return 4
+
+        return nested_foo()
+
+
+def foo():
+    def nested_foo():
+        return 4
+
+    def nested_bar():
+        return 4
+
+    return nested_foo()
