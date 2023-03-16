@@ -1,3 +1,5 @@
+import ast
+import gc
 import os
 from datetime import datetime
 from os import (
@@ -12,11 +14,8 @@ from mutmut import (
     Context,
     mutate,
 )
-from parso import parse
-from tqdm import tqdm
 
-from rich.traceback import install
-install(show_locals=True)
+from tqdm import tqdm
 
 from inspect import signature
 
@@ -50,21 +49,20 @@ def write_trampoline(out, orig_name, mutant_names):
     def index(s):
         return s.rpartition('_')[-1]
 
-    print(f'{orig_name}_mutants = {{' + ', '.join(f'"{index(m)}": {m}' for m in mutant_names) + '}', file=out)
+    print(f'{orig_name}_mutants = {{' + ', '.join(f'{index(m)}: {m}' for m in mutant_names) + '}', file=out)
 
-    print(file=out)
     print(file=out)
     print(f"""
 def {orig_name}(*args, **kwargs):
-    return trampoline({orig_name}_orig, {orig_name}_mutants, *args, **kwargs)  
+    return trampoline({orig_name}_orig, {orig_name}_mutants, *args, **kwargs) 
+ 
 """, file=out)
-    print(f'{orig_name}.__signature__ = __signature({orig_name}_orig)', file=out)
+    print(f'{orig_name}.__signature__ = __signature({orig_name}_orig)\n', file=out)
 
 
 def write_mutant(out, c, mutation_id, next_id, mutant_names, orig_name):
     if not mutation_id.subject_stack:
         return
-    print(file=out)
     c.mutation_id = mutation_id
     new_code, number = mutate(c)
     node = mutation_id.subject_stack[-1]
@@ -73,8 +71,12 @@ def write_mutant(out, c, mutation_id, next_id, mutant_names, orig_name):
     # assert number == 1, number
     if number != 1:
         print(f'warning: got {number} mutations when mutating {mutation_id}')
-    print(node.get_code(), file=out)
+    code = node.get_code()
+    print(code.strip(), file=out)
+    print(file=out)
+    print(file=out)
     node.name.value = orig_name
+    return node.get_code()
 
 
 def write_original_alias(out, last_subject_stack):
@@ -90,8 +92,12 @@ from inspect import signature as __signature
 
 def trampoline(orig, mutants, *args, **kwargs):
     import os
-    mutant_under_test = os.environ.get('MUTANT_UNDER_TEST', None)
-    return mutants.get(mutant_under_test, orig)(*args, **kwargs)""", file=out)
+    mutant_under_test = os.environ['MUTANT_UNDER_TEST']
+    if mutant_under_test == 'fail':
+        raise Exception('Failed programmatically')        
+    return mutants.get(int(mutant_under_test), orig)(*args, **kwargs)
+
+""", file=out)
 
 
 def create_mutants_for_file(filename, next_id):
@@ -100,12 +106,16 @@ def create_mutants_for_file(filename, next_id):
 
     input_stat = os.stat(filename)
 
+    meta_filename = str(output_path) + '.next_id'
+
     if output_path.exists() and output_path.stat().st_mtime == input_stat.st_mtime:
         print('    skipped', output_path, 'already up to date')
-        return int(os.getxattr(output_path, 'user.next_id').decode())
+        with open(meta_filename) as f:
+            return int(f.read().strip())
 
     with open(output_path, 'w') as out:
         c = Context(filename=filename)
+        # print('asd()', file=out)  # force invalid mutants file
         print(c.source, file=out)
         write_trampoline_impl(out)
 
@@ -114,26 +124,30 @@ def create_mutants_for_file(filename, next_id):
         mutant_names = []
         last_subject_stack = None
 
+        last_code = None
+
         for mutation_id in mutation_ids:
-            if not c.subject_stack:
+            if not mutation_id.subject_stack:
                 continue
 
             # TODO: mutate methods too!, then we have a classdef then a funcdef in the stack
-            if c.subject_stack[0].type != 'funcdef':
+            if mutation_id.subject_stack[0].type != 'funcdef':
                 continue
 
-            if last_subject_stack != c.subject_stack:
+            if last_subject_stack != mutation_id.subject_stack:
                 if last_subject_stack:
                     write_original_alias(out, last_subject_stack)
 
                 if mutant_names:
                     write_trampoline(out, orig_name, mutant_names)
 
-                orig_name = c.subject_stack[0].name.value
+                orig_name = mutation_id.subject_stack[0].name.value
                 mutant_names = []
-                last_subject_stack = c.subject_stack
+                last_subject_stack = mutation_id.subject_stack
 
-            write_mutant(out, c, mutation_id, next_id, mutant_names, orig_name)
+            code = write_mutant(out, c, mutation_id, next_id, mutant_names, orig_name)
+            assert last_code != code
+            last_code = code
 
             next_id += 1
 
@@ -143,13 +157,24 @@ def create_mutants_for_file(filename, next_id):
         if mutant_names:
             write_trampoline(out, orig_name, mutant_names)
 
+    # validate no syntax errors
+    with open(output_path) as f:
+        try:
+            ast.parse(f.read())
+        except (IndentationError, SyntaxError) as e:
+            print(output_path, 'has invalid syntax: ', e)
+            exit(1)
+
     os.utime(output_path, (input_stat.st_atime, input_stat.st_mtime))
-    os.setxattr(output_path, 'user.next_id', str(next_id).encode())
+    with open(meta_filename, 'w') as f:
+        f.write(str(next_id))
 
     return next_id
 
 
 def mutmut_3():
+    # TODO: run no-ops once in a while to detect if we get false negatives
+
     start = datetime.now()
     print('generating mutants...')
     next_id = create_mutants()
@@ -157,12 +182,30 @@ def mutmut_3():
     print('mutation generation', time)
 
     import sys
-    sys.path.insert(0, 'mutants')
     import os
     import hammett
 
+    sys.path.insert(0, os.path.abspath('mutants'))
+    os.environ['MUTANT_UNDER_TEST'] = '-1'
+
     print('running baseline...', end='')
+    print(sys.path)
     if hammett.main(fail_fast=True, disable_assert_analyze=True) != 0:
+        print("FAILED")
+        return
+    print('done')
+
+    print('running baseline 2...', end='')
+    print(sys.path)
+    if hammett.main(fail_fast=True, disable_assert_analyze=True) != 0:
+        print("FAILED")
+        return
+    print('done')
+
+    print('running forced fail test')
+    print(sys.path)
+    os.environ['MUTANT_UNDER_TEST'] = 'fail'
+    if hammett.main(fail_fast=True, disable_assert_analyze=True) == 0:
         print("FAILED")
         return
     print('done')
@@ -172,21 +215,27 @@ def mutmut_3():
 
     def read_one_child_exit_status():
         pid, status = os.wait()
-        # print('got exit', pid)
         result_by_key[key_from_pid[pid]] = (0xFF00 & status) >> 8  # The high byte contains the exit code
 
-    hammett_kwargs = hammett.main_setup(quiet=True, fail_fast=True, disable_assert_analyze=True)
+    hammett_kwargs = hammett.main_setup(
+        quiet=False,
+        fail_fast=True,
+        disable_assert_analyze=True,
+        use_cache=False,
+    )
 
     key_from_pid = {}
     running_children = 0
-    max_children = 1
+    max_children = 8
 
     start = datetime.now()
+
+    gc.freeze()
 
     for key in tqdm(range(next_id)):
         pid = os.fork()
         if not pid:
-            # print('in child', os.getpid())
+            sys.path.insert(0, os.path.abspath('mutants'))
             # In the child
             os.environ['MUTANT_UNDER_TEST'] = str(key)
 
@@ -197,10 +246,8 @@ def mutmut_3():
             if result != 0:
                 # TODO: write failure information to stdout?
                 pass
-            # print('exiting', os.getpid())
             os._exit(result)
         else:
-            # print('in master', pid)
             key_from_pid[pid] = key
             running_children += 1
 
@@ -209,7 +256,6 @@ def mutmut_3():
             running_children -= 1
 
     try:
-        # print('waiting at the end')
         while running_children:
             read_one_child_exit_status()
             running_children -= 1
