@@ -2,6 +2,7 @@ import ast
 import gc
 import json
 import os
+from collections import defaultdict
 from datetime import datetime
 from os import (
     makedirs,
@@ -21,6 +22,17 @@ from tqdm import tqdm
 from inspect import signature
 
 
+_stats = set()
+
+
+def record_trampoline_hit(name):
+    _stats.add(name)
+
+
+def get_stats():
+    return _stats
+
+
 def foo(a, *, b: int, **kwargs):
     pass
 
@@ -31,6 +43,7 @@ signature(foo)
 def create_mutants():
     paths = [guess_paths_to_mutate()]
     next_id = 0
+    function_by_id = {}
     for path in paths:
         for root, dirs, files in walk(path):
             for filename in files:
@@ -40,8 +53,8 @@ def create_mutants():
                     continue
                 if filename.startswith('test_.py'):
                     continue
-                next_id = create_mutants_for_file(Path(root) / filename, next_id=next_id)
-    return next_id
+                next_id = create_mutants_for_file(Path(root) / filename, next_id=next_id, function_by_id=function_by_id)
+    return next_id, function_by_id
 
 
 def write_trampoline(out, orig_name, mutant_names):
@@ -95,13 +108,17 @@ def trampoline(orig, mutants, *args, **kwargs):
     import os
     mutant_under_test = os.environ['MUTANT_UNDER_TEST']
     if mutant_under_test == 'fail':
-        raise Exception('Failed programmatically')        
+        raise Exception('Failed programmatically')      
+    elif mutant_under_test == 'stats':
+        from __main__ import record_trampoline_hit
+        record_trampoline_hit(orig.__module__ + '.' + orig.__name__)
+        mutant_under_test = -1
     return mutants.get(int(mutant_under_test), orig)(*args, **kwargs)
 
 """, file=out)
 
 
-def create_mutants_for_file(filename, next_id):
+def create_mutants_for_file(filename, next_id, function_by_id):
     output_path = Path('mutants') / filename
     makedirs(output_path.parent, exist_ok=True)
 
@@ -109,10 +126,11 @@ def create_mutants_for_file(filename, next_id):
 
     meta_filename = str(output_path) + '.next_id'
 
-    if output_path.exists() and output_path.stat().st_mtime == input_stat.st_mtime:
-        print('    skipped', output_path, 'already up to date')
-        with open(meta_filename) as f:
-            return int(f.read().strip())
+    # TODO: cache
+    # if output_path.exists() and output_path.stat().st_mtime == input_stat.st_mtime:
+    #     print('    skipped', output_path, 'already up to date')
+    #     with open(meta_filename) as f:
+    #         return int(f.read().strip())
 
     with open(output_path, 'w') as out:
         c = Context(filename=filename)
@@ -147,6 +165,8 @@ def create_mutants_for_file(filename, next_id):
                 last_subject_stack = mutation_id.subject_stack
 
             code = write_mutant(out, c, mutation_id, next_id, mutant_names, orig_name)
+            module_name = str(filename)[:-len(filename.suffix)].replace(os.sep, ".").replace('.__init__', '')
+            function_by_id[next_id] = f'{module_name}.{orig_name}'
             assert last_code != code
             last_code = code
 
@@ -178,7 +198,8 @@ def mutmut_3():
 
     start = datetime.now()
     print('generating mutants...')
-    next_id = create_mutants()
+    # TODO: read from db!!!!
+    next_id, function_by_id = create_mutants()
     time = datetime.now() - start
     print('mutation generation', time)
 
@@ -187,15 +208,9 @@ def mutmut_3():
     import hammett
 
     sys.path.insert(0, os.path.abspath('mutants'))
+
+    print('running baseline...')
     os.environ['MUTANT_UNDER_TEST'] = '-1'
-
-    print('running baseline...', end='')
-    if hammett.main(quiet=True, fail_fast=True, disable_assert_analyze=True) != 0:
-        print("FAILED")
-        return
-    print('done')
-
-    print('running baseline 2...', end='')
     if hammett.main(quiet=True, fail_fast=True, disable_assert_analyze=True) != 0:
         print("FAILED")
         return
@@ -204,6 +219,21 @@ def mutmut_3():
     print('running forced fail test')
     os.environ['MUTANT_UNDER_TEST'] = 'fail'
     if hammett.main(fail_fast=True, disable_assert_analyze=True) == 0:
+        print("FAILED")
+        return
+    print('done')
+
+    print('running stats...')
+    os.environ['MUTANT_UNDER_TEST'] = 'stats'
+
+    tests_by_function = defaultdict(set)
+
+    def post_test_callback(name, **_):
+        for function in get_stats():
+            tests_by_function[function].add(name)
+        _stats.clear()
+
+    if hammett.main(quiet=True, fail_fast=True, disable_assert_analyze=True, post_test_callback=post_test_callback) != 0:
         print("FAILED")
         return
     print('done')
@@ -252,7 +282,7 @@ def mutmut_3():
                 # TODO: this is needed for non-memory DBs
                 hammett.Config.workerinput = dict(workerinput=f'_{key}')
 
-                result = hammett.main_run_tests(**hammett_kwargs)
+                result = hammett.main_run_tests(**hammett_kwargs, tests=tests_by_function[function_by_id[key]])
                 if result != 0:
                     # TODO: write failure information to stdout?
                     pass
@@ -281,6 +311,8 @@ def mutmut_3():
                 dict(
                     version=1,
                     result_by_key=result_by_key,
+                    next_id=next_id,
+                    function_by_id=function_by_id,
                 ),
                 f
             )
