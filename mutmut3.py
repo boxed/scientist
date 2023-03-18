@@ -228,9 +228,9 @@ def mutmut_3():
 
     tests_by_function = defaultdict(set)
 
-    def post_test_callback(name, **_):
+    def post_test_callback(_name, **_):
         for function in get_stats():
-            tests_by_function[function].add(name)
+            tests_by_function[function].add(_name)
         _stats.clear()
 
     if hammett.main(quiet=True, fail_fast=True, disable_assert_analyze=True, post_test_callback=post_test_callback) != 0:
@@ -321,8 +321,12 @@ def mutmut_3():
 
     covered = {k for k, v in result_by_key.items() if v != 0}
     not_covered = {k for k, v in result_by_key.items() if v == 0}
-    print('covered: ', covered)
-    print('not covered: ', not_covered)
+    print('covered:', covered)
+    print('not covered:', not_covered)
+
+    print('number of covered:', len(covered))
+    print('number of not covered:', len(not_covered))
+    print('%:', len(not_covered) / (len(covered) + len(not_covered)) * 100)
 
     print('time:', t)
     print('next ID:', next_id)
